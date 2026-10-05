@@ -217,15 +217,15 @@ bool initializeImGUI() {
 	return ImGui_ImplVulkan_Init(&init);
 }
 
-void drawImGUI() {
-	vkResetCommandBuffer(vk_imgui_command_buffer, 0);
+void drawImGUI() {		// отрисовка интерфейса ImGui
+	vkResetCommandBuffer(vk_imgui_command_buffer, 0);	// сбрасывает командный буфер ImGui
 
 	const VkCommandBufferBeginInfo command_buffer_begin = {
 		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
 		.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
 	};
 
-	vkBeginCommandBuffer(vk_imgui_command_buffer, &command_buffer_begin);
+	vkBeginCommandBuffer(vk_imgui_command_buffer, &command_buffer_begin);	// начинает запись команд
 
 	const VkRenderPassBeginInfo render_pass_begin = {
 		.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -234,13 +234,13 @@ void drawImGUI() {
 		.renderArea = { .extent = context.swapchain_extent },
 	};
 
-	vkCmdBeginRenderPass(vk_imgui_command_buffer, &render_pass_begin, VK_SUBPASS_CONTENTS_INLINE);
+	vkCmdBeginRenderPass(vk_imgui_command_buffer, &render_pass_begin, VK_SUBPASS_CONTENTS_INLINE);	// начинает проход отрисовки интерфейса
 
-	ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), vk_imgui_command_buffer);
+	ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), vk_imgui_command_buffer);		// записывает команды для отображения интерфейса
 
-	vkCmdEndRenderPass(vk_imgui_command_buffer);
+	vkCmdEndRenderPass(vk_imgui_command_buffer);	// завершает проход
 
-	vkEndCommandBuffer(vk_imgui_command_buffer);
+	vkEndCommandBuffer(vk_imgui_command_buffer);	// завершает запись команд
 }
 
 bool rebuildSwapchain(uint32_t width, uint32_t height) {
@@ -720,10 +720,10 @@ void resize(uint32_t width, uint32_t height) {
 }
 
 FrameData prepare() {
-	vkWaitForFences(context.device, 1, &vk_fence_frame_in_flight, VK_TRUE, UINT64_MAX);
+	vkWaitForFences(context.device, 1, &vk_fence_frame_in_flight, VK_TRUE, UINT64_MAX); // ждет пока GPU завершит предыдущую работу
 
 retry_acquire:
-	switch (vkAcquireNextImageKHR(context.device, vk_swapchain, UINT64_MAX,
+	switch (vkAcquireNextImageKHR(context.device, vk_swapchain, UINT64_MAX,		// получает изображение из swapchain, где будет отображаться следующий кадр
 								  vk_semaphore_image_available, VK_NULL_HANDLE,
 								  &vk_swapchain_current_image)) {
 	case VK_SUCCESS:
@@ -742,19 +742,19 @@ retry_acquire:
 		return {};
 	}
 
-	vkResetFences(context.device, 1, &vk_fence_frame_in_flight);
+	vkResetFences(context.device, 1, &vk_fence_frame_in_flight); // сбрасывает fence перед следующей отправкой команд
 
-	return {
+	return {	// возвращает FrameData содержащий буфер изображения и командный буфер
 		.framebuffer = vk_framebuffers[vk_swapchain_current_image],
 		.command_buffer = vk_command_buffer,
 	};
 }
 
-void submitAndPresent() {
+void submitAndPresent() { // как отправляются команды GPU и как изображение выводится на экран
 	drawImGUI();
 
 	const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-	const VkCommandBuffer command_buffers[] = {
+	const VkCommandBuffer command_buffers[] = {	// отправляются два командных буфера
 		vk_command_buffer,
 		vk_imgui_command_buffer,
 	};
@@ -770,7 +770,7 @@ void submitAndPresent() {
 		.pSignalSemaphores = &vk_semaphores_image_finished[vk_swapchain_current_image],
 	};
 
-	vkQueueSubmit(context.graphics_queue, 1, &submit, vk_fence_frame_in_flight);
+	vkQueueSubmit(context.graphics_queue, 1, &submit, vk_fence_frame_in_flight); // отправляет команды на выполнение
 
 	const VkPresentInfoKHR present = {
 		.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -781,7 +781,7 @@ void submitAndPresent() {
 		.pImageIndices = &vk_swapchain_current_image,
 	};
 
-	VkResult result = vkQueuePresentKHR(context.graphics_queue, &present);
+	VkResult result = vkQueuePresentKHR(context.graphics_queue, &present); // выводит готовое изображение на экран
 	if (result == VK_ERROR_OUT_OF_DATE_KHR ||
 	    result == VK_SUBOPTIMAL_KHR ||
 	    vk_swapchain_resize_require) {

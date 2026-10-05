@@ -12,20 +12,20 @@ namespace graphics::internal {
 
 struct Context {
 	VkPhysicalDevice physical_device;
-	VkDevice device;
+	VkDevice device; // графическое устройство
 
-	VmaAllocator allocator;
+	VmaAllocator allocator; // управление видеопамятью
 
-	VkQueue graphics_queue;
+	VkQueue graphics_queue; // очередь графических команд
 	uint32_t graphics_queue_index;
 
-	VkFormat swapchain_format;
-	VkExtent2D swapchain_extent;
+	VkFormat swapchain_format; // формат изображения
+	VkExtent2D swapchain_extent; // размер изображения
 
-	VkRenderPass render_pass;
+	VkRenderPass render_pass; // проход отрисовки
 };
 
-struct FrameData {
+struct FrameData { // запись команд для отрисовки текущего кадра
 	VkFramebuffer framebuffer;
 	VkCommandBuffer command_buffer;
 };
