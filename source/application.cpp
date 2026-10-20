@@ -122,10 +122,40 @@ VmaAllocation index_buffer_allocation = VK_NULL_HANDLE;
 
 VkShaderModule vertex_shader = VK_NULL_HANDLE;
 VkShaderModule fragment_shader = VK_NULL_HANDLE;
+VkShaderModule light_visualization_fragment_shader = VK_NULL_HANDLE;
 
 VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
 
 VkPipeline graphics_pipeline = VK_NULL_HANDLE;
+VkPipeline light_visualization_pipeline = VK_NULL_HANDLE;
+
+VkShaderModule light_lines_vertex_shader = VK_NULL_HANDLE;
+VkShaderModule light_lines_fragment_shader = VK_NULL_HANDLE;
+VkPipeline light_lines_pipeline = VK_NULL_HANDLE;
+
+VkBuffer light_lines_vertex_buffer = VK_NULL_HANDLE;
+VmaAllocation light_lines_vertex_buffer_allocation = VK_NULL_HANDLE;
+
+uint32_t light_lines_vertex_count = 0;
+
+
+struct LightMarker {
+    VkBuffer uniform_buffer = VK_NULL_HANDLE;
+    VmaAllocation uniform_buffer_allocation = VK_NULL_HANDLE;
+    VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+};
+
+struct LightSphereGeometry {
+    VkBuffer vertex_buffer = VK_NULL_HANDLE;
+    VmaAllocation vertex_buffer_allocation = VK_NULL_HANDLE;
+    VkBuffer index_buffer = VK_NULL_HANDLE;
+    VmaAllocation index_buffer_allocation = VK_NULL_HANDLE;
+    uint32_t index_count = 0;
+};
+
+LightSphereGeometry light_sphere;
+
+std::vector<LightMarker> light_markers;
 
 VkBuffer scene_uniform_buffer = VK_NULL_HANDLE;
 VmaAllocation scene_uniform_buffer_allocation = VK_NULL_HANDLE;
@@ -151,6 +181,7 @@ VmaAllocation point_light_buffer_allocation = VK_NULL_HANDLE;
 
 VkBuffer spot_light_buffer = VK_NULL_HANDLE;
 VmaAllocation spot_light_buffer_allocation = VK_NULL_HANDLE;
+
 
 glm::vec3 object_position = glm::vec3(0.0f);
 glm::vec3 object_rotation = glm::vec3(0.0f);
@@ -184,6 +215,8 @@ float ambient_intensity = 0.15f;
 // материал
 glm::vec3 material_specular = glm::vec3(1.0f);
 float material_shininess = 32.0f;
+
+bool show_light_visualization = true;
 
 
 std::vector<PointLight> point_lights = {
@@ -251,6 +284,184 @@ bool createBuffer(
 
 	return true;
 }
+
+bool createLightSphereGeometry()
+{
+    constexpr uint32_t segments = 16;
+    constexpr uint32_t rings = 12;
+
+    std::vector<Vertex> sphere_vertices;
+    std::vector<uint32_t> sphere_indices;
+
+    for (uint32_t ring = 0; ring <= rings; ++ring) {
+        float theta = glm::pi<float>() *
+            static_cast<float>(ring) / static_cast<float>(rings);
+
+        for (uint32_t segment = 0; segment <= segments; ++segment) {
+            float phi = 2.0f * glm::pi<float>() *
+                static_cast<float>(segment) /
+                static_cast<float>(segments);
+
+            float x = std::sin(theta) * std::cos(phi);
+            float y = std::cos(theta);
+            float z = std::sin(theta) * std::sin(phi);
+
+            sphere_vertices.push_back({
+                x, y, z,
+                x, y, z
+            });
+        }
+    }
+
+    for (uint32_t ring = 0; ring < rings; ++ring) {
+        for (uint32_t segment = 0; segment < segments; ++segment) {
+            uint32_t first = ring * (segments + 1) + segment;
+            uint32_t second = first + segments + 1;
+
+            sphere_indices.push_back(first);
+            sphere_indices.push_back(second);
+            sphere_indices.push_back(first + 1);
+
+            sphere_indices.push_back(second);
+            sphere_indices.push_back(second + 1);
+            sphere_indices.push_back(first + 1);
+        }
+    }
+
+    if (!createBuffer(
+            sphere_vertices.size() * sizeof(Vertex),
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            sphere_vertices.data(),
+            light_sphere.vertex_buffer,
+            light_sphere.vertex_buffer_allocation)) {
+        return false;
+    }
+
+    if (!createBuffer(
+            sphere_indices.size() * sizeof(uint32_t),
+            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            sphere_indices.data(),
+            light_sphere.index_buffer,
+            light_sphere.index_buffer_allocation)) {
+        return false;
+    }
+
+    light_sphere.index_count =
+        static_cast<uint32_t>(sphere_indices.size());
+
+    return true;
+}
+
+
+void updateLightLinesGeometry()
+{
+    constexpr uint32_t segments = 32;
+    constexpr float cone_length = 2.5f;
+    constexpr uint32_t vertices_per_spot = 2 + segments * 2 + 16;
+    constexpr uint32_t max_vertices =
+        MAX_SPOT_LIGHTS * vertices_per_spot;
+
+    std::vector<glm::vec3> vertices;
+    vertices.reserve(max_vertices);
+
+    for (size_t i = 0;
+         i < spot_lights.size() && i < MAX_SPOT_LIGHTS;
+         ++i) {
+        const SpotLight& spot = spot_lights[i];
+
+        glm::vec3 origin = glm::vec3(spot.position);
+        glm::vec3 direction = glm::vec3(spot.direction);
+
+        if (glm::length(direction) < 0.001f) {
+            direction = glm::vec3(0.0f, -1.0f, 0.0f);
+        }
+
+        direction = glm::normalize(direction);
+
+        glm::vec3 reference =
+            std::abs(direction.y) < 0.99f
+                ? glm::vec3(0.0f, 1.0f, 0.0f)
+                : glm::vec3(1.0f, 0.0f, 0.0f);
+
+        glm::vec3 right =
+            glm::normalize(glm::cross(direction, reference));
+        glm::vec3 up =
+            glm::normalize(glm::cross(right, direction));
+
+        glm::vec3 tip = origin + direction * cone_length;
+
+        vertices.push_back(origin);
+        vertices.push_back(tip);
+
+        float radius = cone_length *
+            std::tan(glm::radians(spot.cone_angles.y));
+
+        std::vector<glm::vec3> ring;
+        ring.reserve(segments);
+
+        for (uint32_t j = 0; j < segments; ++j) {
+            float angle = 2.0f * glm::pi<float>() *
+                static_cast<float>(j) / segments;
+
+            glm::vec3 point = tip +
+                radius * (
+                    std::cos(angle) * right +
+                    std::sin(angle) * up
+                );
+
+            ring.push_back(point);
+        }
+
+        for (uint32_t j = 0; j < segments; ++j) {
+            vertices.push_back(ring[j]);
+            vertices.push_back(ring[(j + 1) % segments]);
+        }
+
+        for (uint32_t j = 0; j < 8; ++j) {
+            uint32_t index = j * segments / 8;
+            vertices.push_back(origin);
+            vertices.push_back(ring[index]);
+        }
+    }
+
+    if (light_lines_vertex_buffer == VK_NULL_HANDLE) {
+        std::vector<glm::vec3> initial_data(max_vertices);
+
+        if (!createBuffer(
+                sizeof(glm::vec3) * max_vertices,
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                initial_data.data(),
+                light_lines_vertex_buffer,
+                light_lines_vertex_buffer_allocation)) {
+            std::cerr << "FAILED: light lines vertex buffer\n";
+            return;
+        }
+    }
+
+    void* mapped_data = nullptr;
+
+    if (vmaMapMemory(
+            graphics::internal::context.allocator,
+            light_lines_vertex_buffer_allocation,
+            &mapped_data) != VK_SUCCESS) {
+        return;
+    }
+
+    if (!vertices.empty()) {
+        std::memcpy(
+            mapped_data,
+            vertices.data(),
+            sizeof(glm::vec3) * vertices.size());
+    }
+
+    vmaUnmapMemory(
+        graphics::internal::context.allocator,
+        light_lines_vertex_buffer_allocation);
+
+    light_lines_vertex_count =
+        static_cast<uint32_t>(vertices.size());
+}
+
 
 std::vector<char> readFile(const char* filename)
 {
@@ -498,6 +709,8 @@ void updateSpotLightBuffer()
     );
 }
 
+bool syncLightMarkers();
+void updateLightMarkerBuffers();
 void updateUniformBuffer()
 {
     auto& context = graphics::internal::context;
@@ -571,8 +784,170 @@ void updateUniformBuffer()
 
 	updatePointLightBuffer();
 	updateSpotLightBuffer();
+
+	if (syncLightMarkers()) {
+		updateLightMarkerBuffers();
+	}
+	updateLightLinesGeometry();
 }
 
+bool syncLightMarkers()
+{
+    auto& context = graphics::internal::context;
+
+    size_t point_count = std::min(
+        point_lights.size(),
+        static_cast<size_t>(MAX_POINT_LIGHTS)
+    );
+
+    size_t spot_count = std::min(
+        spot_lights.size(),
+        static_cast<size_t>(MAX_SPOT_LIGHTS)
+    );
+
+    size_t required_count = point_count + spot_count;
+
+    while (light_markers.size() < required_count) {
+        LightMarker marker{};
+
+        ModelUniformData data{};
+        data.model = glm::mat4(1.0f);
+        data.color = glm::vec4(1.0f);
+        data.material_specular = glm::vec4(1.0f);
+
+        if (!createBuffer(
+                sizeof(ModelUniformData),
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                &data,
+                marker.uniform_buffer,
+                marker.uniform_buffer_allocation)) {
+            return false;
+        }
+
+        VkDescriptorSetAllocateInfo allocate_info{};
+        allocate_info.sType =
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocate_info.descriptorPool = descriptor_pool;
+        allocate_info.descriptorSetCount = 1;
+        allocate_info.pSetLayouts = &model_descriptor_set_layout;
+
+        if (vkAllocateDescriptorSets(
+                context.device,
+                &allocate_info,
+                &marker.descriptor_set) != VK_SUCCESS) {
+            vmaDestroyBuffer(
+                context.allocator,
+                marker.uniform_buffer,
+                marker.uniform_buffer_allocation
+            );
+
+            return false;
+        }
+
+        VkDescriptorBufferInfo buffer_info{};
+        buffer_info.buffer = marker.uniform_buffer;
+        buffer_info.offset = 0;
+        buffer_info.range = sizeof(ModelUniformData);
+
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = marker.descriptor_set;
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write.pBufferInfo = &buffer_info;
+
+        vkUpdateDescriptorSets(
+            context.device,
+            1,
+            &write,
+            0,
+            nullptr
+        );
+
+        light_markers.push_back(marker);
+    }
+
+    return true;
+}
+
+void updateLightMarkerBuffers()
+{
+    auto& context = graphics::internal::context;
+
+    size_t marker_index = 0;
+
+    auto update_marker = [&](const glm::vec3& position,
+                             const glm::vec4& color) {
+        if (marker_index >= light_markers.size()) {
+            return;
+        }
+
+        ModelUniformData data{};
+        data.model = glm::translate(
+            glm::mat4(1.0f),
+            position
+        );
+
+        data.model = glm::scale(
+            data.model,
+            glm::vec3(0.15f)
+        );
+
+        data.color = glm::vec4(
+            glm::clamp(glm::vec3(color), glm::vec3(0.0f), glm::vec3(1.0f)),
+            1.0f
+        );
+
+        data.material_specular = glm::vec4(1.0f);
+
+        LightMarker& marker = light_markers[marker_index];
+
+        void* mapped_data = nullptr;
+
+        if (vmaMapMemory(
+                context.allocator,
+                marker.uniform_buffer_allocation,
+                &mapped_data) == VK_SUCCESS) {
+            std::memcpy(
+                mapped_data,
+                &data,
+                sizeof(ModelUniformData)
+            );
+
+            vmaUnmapMemory(
+                context.allocator,
+                marker.uniform_buffer_allocation
+            );
+        }
+
+        ++marker_index;
+    };
+
+    size_t point_count = std::min(
+        point_lights.size(),
+        static_cast<size_t>(MAX_POINT_LIGHTS)
+    );
+
+    for (size_t i = 0; i < point_count; ++i) {
+        update_marker(
+            glm::vec3(point_lights[i].position),
+            point_lights[i].color
+        );
+    }
+
+    size_t spot_count = std::min(
+        spot_lights.size(),
+        static_cast<size_t>(MAX_SPOT_LIGHTS)
+    );
+
+    for (size_t i = 0; i < spot_count; ++i) {
+        update_marker(
+            glm::vec3(spot_lights[i].position),
+            spot_lights[i].color
+        );
+    }
+}
 
 
 namespace application {
@@ -589,6 +964,15 @@ bool initialize() {
 				nullptr);
 
 			graphics_pipeline = VK_NULL_HANDLE;
+		}
+
+		if (light_visualization_pipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(
+				context.device,
+				light_visualization_pipeline,
+				nullptr);
+
+			light_visualization_pipeline = VK_NULL_HANDLE;
 		}
 
 		if (pipeline_layout != VK_NULL_HANDLE) {
@@ -618,6 +1002,50 @@ bool initialize() {
 			fragment_shader = VK_NULL_HANDLE;
 		}
 
+		if (light_visualization_fragment_shader != VK_NULL_HANDLE) {
+			vkDestroyShaderModule(
+				context.device,
+				light_visualization_fragment_shader,
+				nullptr
+			);
+
+			light_visualization_fragment_shader = VK_NULL_HANDLE;
+		}
+
+		
+		if (light_lines_vertex_shader != VK_NULL_HANDLE) {
+			vkDestroyShaderModule(
+				context.device,
+				light_lines_vertex_shader,
+				nullptr);
+			light_lines_vertex_shader = VK_NULL_HANDLE;
+		}
+
+		if (light_lines_fragment_shader != VK_NULL_HANDLE) {
+			vkDestroyShaderModule(
+				context.device,
+				light_lines_fragment_shader,
+				nullptr);
+			light_lines_fragment_shader = VK_NULL_HANDLE;
+		}
+
+		if (light_lines_vertex_shader != VK_NULL_HANDLE) {
+			vkDestroyShaderModule(
+				context.device,
+				light_lines_vertex_shader,
+				nullptr);
+			light_lines_vertex_shader = VK_NULL_HANDLE;
+		}
+
+		if (light_lines_fragment_shader != VK_NULL_HANDLE) {
+			vkDestroyShaderModule(
+				context.device,
+				light_lines_fragment_shader,
+				nullptr);
+			light_lines_fragment_shader = VK_NULL_HANDLE;
+		}
+
+
 		if (vertex_buffer != VK_NULL_HANDLE) {
 			vmaDestroyBuffer(
 				context.allocator,
@@ -636,6 +1064,28 @@ bool initialize() {
 
 			index_buffer = VK_NULL_HANDLE;
 			index_buffer_allocation = VK_NULL_HANDLE;
+		}
+
+		if (light_sphere.vertex_buffer != VK_NULL_HANDLE) {
+			vmaDestroyBuffer(
+				context.allocator,
+				light_sphere.vertex_buffer,
+				light_sphere.vertex_buffer_allocation
+			);
+
+			light_sphere.vertex_buffer = VK_NULL_HANDLE;
+			light_sphere.vertex_buffer_allocation = VK_NULL_HANDLE;
+		}
+
+		if (light_sphere.index_buffer != VK_NULL_HANDLE) {
+			vmaDestroyBuffer(
+				context.allocator,
+				light_sphere.index_buffer,
+				light_sphere.index_buffer_allocation
+			);
+
+			light_sphere.index_buffer = VK_NULL_HANDLE;
+			light_sphere.index_buffer_allocation = VK_NULL_HANDLE;
 		}
 
 		if (scene_uniform_buffer != VK_NULL_HANDLE) {
@@ -708,8 +1158,13 @@ bool initialize() {
 			indices,
 			index_buffer,
 			index_buffer_allocation)) {
-
 		std::cerr << "FAILED: index buffer\n";
+		cleanup();
+		return false;
+	}
+
+	if (!createLightSphereGeometry()) {
+		std::cerr << "FAILED: light sphere geometry\n";
 		cleanup();
 		return false;
 	}
@@ -821,6 +1276,41 @@ bool initialize() {
 		return false;
 	}
 
+	const auto light_visualization_fragment_shader_code =
+		readFile("../shaders/light_visualization.frag.spv");
+
+	if (!createShaderModule(
+			light_visualization_fragment_shader_code,
+			light_visualization_fragment_shader)) {
+		std::cerr << "FAILED: light visualization fragment shader\n";
+		cleanup();
+		return false;
+	}
+
+	
+	const auto light_lines_vertex_shader_code =
+		readFile("../shaders/light_lines.vert.spv");
+
+	if (!createShaderModule(
+			light_lines_vertex_shader_code,
+			light_lines_vertex_shader)) {
+		std::cerr << "FAILED: light lines vertex shader\n";
+		cleanup();
+		return false;
+	}
+
+	const auto light_lines_fragment_shader_code =
+		readFile("../shaders/light_lines.frag.spv");
+
+	if (!createShaderModule(
+			light_lines_fragment_shader_code,
+			light_lines_fragment_shader)) {
+		std::cerr << "FAILED: light lines fragment shader\n";
+		cleanup();
+		return false;
+	}
+
+
 	VkDescriptorSetLayoutBinding scene_bindings[3]{};
 
 	scene_bindings[0].binding = 0;
@@ -906,14 +1396,14 @@ bool initialize() {
 	VkDescriptorPoolSize pool_sizes[2]{};
 
 	pool_sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	pool_sizes[0].descriptorCount = 3;
+	pool_sizes[0].descriptorCount = 64;
 
 	pool_sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	pool_sizes[1].descriptorCount = 2;
 
 	VkDescriptorPoolCreateInfo pool_info{};
 	pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	pool_info.maxSets = 3;
+	pool_info.maxSets = 64;
 	pool_info.poolSizeCount = 2;
 	pool_info.pPoolSizes = pool_sizes;
 
@@ -1030,6 +1520,13 @@ bool initialize() {
 		nullptr
 	);
 
+	if (!syncLightMarkers()) {
+		std::cerr << "FAILED: light markers initialization\n";
+		cleanup();
+		return false;
+	}
+
+	updateLightMarkerBuffers();
 
 	VkVertexInputBindingDescription binding_description{};
 	binding_description.binding = 0;
@@ -1206,6 +1703,97 @@ bool initialize() {
 		return false;
 	}
 
+	VkPipelineShaderStageCreateInfo visualization_shader_stages[] = {
+		{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+			.stage = VK_SHADER_STAGE_VERTEX_BIT,
+			.module = vertex_shader,
+			.pName = "main",
+		},
+		{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+			.stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+			.module = light_visualization_fragment_shader,
+			.pName = "main",
+		}
+	};
+
+	VkGraphicsPipelineCreateInfo visualization_pipeline_info = pipeline_info;
+	visualization_pipeline_info.pStages = visualization_shader_stages;
+
+	if (vkCreateGraphicsPipelines(
+			context.device,
+			VK_NULL_HANDLE,
+			1,
+			&visualization_pipeline_info,
+			nullptr,
+			&light_visualization_pipeline) != VK_SUCCESS) {
+
+		std::cerr << "FAILED: light visualization pipeline\n";
+		cleanup();
+		return false;
+	}
+
+	VkPipelineShaderStageCreateInfo line_shader_stages[] = {
+		{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+			.stage = VK_SHADER_STAGE_VERTEX_BIT,
+			.module = light_lines_vertex_shader,
+			.pName = "main",
+		},
+		{
+			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+			.stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+			.module = light_lines_fragment_shader,
+			.pName = "main",
+		}
+	};
+
+	VkVertexInputBindingDescription line_binding_description{};
+	line_binding_description.binding = 0;
+	line_binding_description.stride = sizeof(glm::vec3);
+	line_binding_description.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+	VkVertexInputAttributeDescription line_attribute_description{};
+	line_attribute_description.binding = 0;
+	line_attribute_description.location = 0;
+	line_attribute_description.format = VK_FORMAT_R32G32B32_SFLOAT;
+	line_attribute_description.offset = 0;
+
+	VkPipelineVertexInputStateCreateInfo line_vertex_input_info{};
+	line_vertex_input_info.sType =
+		VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+	line_vertex_input_info.vertexBindingDescriptionCount = 1;
+	line_vertex_input_info.pVertexBindingDescriptions =
+		&line_binding_description;
+	line_vertex_input_info.vertexAttributeDescriptionCount = 1;
+	line_vertex_input_info.pVertexAttributeDescriptions =
+		&line_attribute_description;
+
+	VkPipelineInputAssemblyStateCreateInfo line_input_assembly_info{};
+	line_input_assembly_info.sType =
+		VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	line_input_assembly_info.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+	line_input_assembly_info.primitiveRestartEnable = VK_FALSE;
+
+	VkGraphicsPipelineCreateInfo line_pipeline_info = pipeline_info;
+	line_pipeline_info.pStages = line_shader_stages;
+	line_pipeline_info.pVertexInputState = &line_vertex_input_info;
+	line_pipeline_info.pInputAssemblyState = &line_input_assembly_info;
+
+	if (vkCreateGraphicsPipelines(
+			context.device,
+			VK_NULL_HANDLE,
+			1,
+			&line_pipeline_info,
+			nullptr,
+			&light_lines_pipeline) != VK_SUCCESS) {
+		std::cerr << "FAILED: light lines pipeline\n";
+		cleanup();
+		return false;
+	}
+
+
 	return true;
 }
 
@@ -1219,6 +1807,15 @@ void shutdown() {
         context.device,
         graphics_pipeline,
         nullptr);
+
+	if (light_visualization_pipeline != VK_NULL_HANDLE) {
+		vkDestroyPipeline(
+			context.device,
+			light_visualization_pipeline,
+			nullptr);
+
+		light_visualization_pipeline = VK_NULL_HANDLE;
+	}
 
     vkDestroyPipelineLayout(
         context.device,
@@ -1234,6 +1831,28 @@ void shutdown() {
         context.allocator,
         index_buffer,
         index_buffer_allocation);
+	
+	if (light_sphere.vertex_buffer != VK_NULL_HANDLE) {
+		vmaDestroyBuffer(
+			context.allocator,
+			light_sphere.vertex_buffer,
+			light_sphere.vertex_buffer_allocation
+		);
+
+		light_sphere.vertex_buffer = VK_NULL_HANDLE;
+		light_sphere.vertex_buffer_allocation = VK_NULL_HANDLE;
+	}
+
+	if (light_sphere.index_buffer != VK_NULL_HANDLE) {
+		vmaDestroyBuffer(
+			context.allocator,
+			light_sphere.index_buffer,
+			light_sphere.index_buffer_allocation
+		);
+
+		light_sphere.index_buffer = VK_NULL_HANDLE;
+		light_sphere.index_buffer_allocation = VK_NULL_HANDLE;
+	}
 
     vmaDestroyBuffer(
         context.allocator,
@@ -1301,6 +1920,55 @@ void shutdown() {
         context.device,
         fragment_shader,
         nullptr);
+
+	if (light_visualization_fragment_shader != VK_NULL_HANDLE) {
+		vkDestroyShaderModule(
+			context.device,
+			light_visualization_fragment_shader,
+			nullptr
+		);
+
+		light_visualization_fragment_shader = VK_NULL_HANDLE;
+	}
+
+	
+	if (light_lines_vertex_buffer != VK_NULL_HANDLE) {
+		vmaDestroyBuffer(
+			context.allocator,
+			light_lines_vertex_buffer,
+			light_lines_vertex_buffer_allocation);
+
+		light_lines_vertex_buffer = VK_NULL_HANDLE;
+		light_lines_vertex_buffer_allocation = VK_NULL_HANDLE;
+	}
+
+	if (light_lines_pipeline != VK_NULL_HANDLE) {
+		vkDestroyPipeline(
+			context.device,
+			light_lines_pipeline,
+			nullptr);
+
+		light_lines_pipeline = VK_NULL_HANDLE;
+	}
+
+	if (light_lines_vertex_shader != VK_NULL_HANDLE) {
+		vkDestroyShaderModule(
+			context.device,
+			light_lines_vertex_shader,
+			nullptr);
+
+		light_lines_vertex_shader = VK_NULL_HANDLE;
+	}
+
+	if (light_lines_fragment_shader != VK_NULL_HANDLE) {
+		vkDestroyShaderModule(
+			context.device,
+			light_lines_fragment_shader,
+			nullptr);
+
+		light_lines_fragment_shader = VK_NULL_HANDLE;
+	}
+
 }
 
 void update(double time)
@@ -1553,6 +2221,13 @@ void update(double time)
 		}
 	}
 
+	if (ImGui::CollapsingHeader("Light Visualization")) {
+		ImGui::Checkbox(
+			"Show light sources",
+			&show_light_visualization
+		);
+	}
+
 
     ImGui::Separator();
 
@@ -1760,6 +2435,97 @@ void render(const graphics::internal::FrameData& fd)
 		0,
 		0,
 		0);
+
+	if (show_light_visualization) {
+		vkCmdBindPipeline(
+			fd.command_buffer,
+			VK_PIPELINE_BIND_POINT_GRAPHICS,
+			light_visualization_pipeline
+		);
+
+		VkDeviceSize sphere_offset = 0;
+
+		vkCmdBindVertexBuffers(
+			fd.command_buffer,
+			0,
+			1,
+			&light_sphere.vertex_buffer,
+			&sphere_offset
+		);
+
+		vkCmdBindIndexBuffer(
+			fd.command_buffer,
+			light_sphere.index_buffer,
+			0,
+			VK_INDEX_TYPE_UINT32
+		);
+
+		size_t point_count = std::min(
+			point_lights.size(),
+			static_cast<size_t>(MAX_POINT_LIGHTS)
+		);
+
+		size_t spot_count = std::min(
+			spot_lights.size(),
+			static_cast<size_t>(MAX_SPOT_LIGHTS)
+		);
+
+		size_t marker_count = point_count + spot_count;
+
+		for (size_t i = 0;
+			i < marker_count && i < light_markers.size();
+			++i) {
+			VkDescriptorSet marker_descriptor_sets[] = {
+				scene_descriptor_set,
+				light_markers[i].descriptor_set
+			};
+
+			vkCmdBindDescriptorSets(
+				fd.command_buffer,
+				VK_PIPELINE_BIND_POINT_GRAPHICS,
+				pipeline_layout,
+				0,
+				2,
+				marker_descriptor_sets,
+				0,
+				nullptr
+			);
+
+			vkCmdDrawIndexed(
+				fd.command_buffer,
+				light_sphere.index_count,
+				1,
+				0,
+				0,
+				0
+			);
+		}
+	}
+
+		
+	if (show_light_visualization && light_lines_vertex_count > 0) {
+		vkCmdBindPipeline(
+			fd.command_buffer,
+			VK_PIPELINE_BIND_POINT_GRAPHICS,
+			light_lines_pipeline);
+
+		VkDeviceSize line_offset = 0;
+
+		vkCmdBindVertexBuffers(
+			fd.command_buffer,
+			0,
+			1,
+			&light_lines_vertex_buffer,
+			&line_offset);
+
+		vkCmdDraw(
+			fd.command_buffer,
+			light_lines_vertex_count,
+			1,
+			0,
+			0);
+	}
+
 
 	vkCmdEndRenderPass(fd.command_buffer);
 

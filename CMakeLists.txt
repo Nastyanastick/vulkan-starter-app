@@ -113,6 +113,7 @@ if(GLSLC_FOUND)
 
 	compile_shader(icosahedron.vert)
 	compile_shader(icosahedron.frag)
+	compile_shader(light_visualization.frag)
 
 	add_custom_target(shaders DEPENDS ${_SHADER_BINARIES})
 	add_dependencies(${PROJECT_NAME} shaders)
