@@ -1,4 +1,7 @@
+#define STB_IMAGE_IMPLEMENTATION
 #include "application.hpp"
+#include "stb_image.h"
+#include <GLFW/glfw3.h>
 
 #include <imgui.h>
 #include <cmath>
@@ -16,7 +19,18 @@
 struct Vertex {
     float x, y, z;
     float nx, ny, nz;
+    float u, v;
 };
+
+Vertex makeVertex(float x, float y, float z, float nx, float ny, float nz)
+{
+    float length = std::sqrt(x * x + y * y + z * z);
+
+    float u = std::atan2(z, x) / (2.0f * glm::pi<float>()) + 0.5f;
+    float v = std::asin(y / length) / glm::pi<float>() + 0.5f;
+
+    return { x, y, z, nx, ny, nz, u, v };
+}
 
 struct SceneUniformData {
     glm::mat4 view;
@@ -32,6 +46,7 @@ struct ModelUniformData {
     glm::vec4 color;
     glm::vec4 material_specular;
 };
+
 
 struct PointLight { // положение источника в пространстве 
     glm::vec4 position;
@@ -75,20 +90,20 @@ const float phi = (1.0f + std::sqrt(5.0f)) / 2.0f;
 const float inv_length = 1.0f / std::sqrt(1.0f + phi * phi);
 
 const Vertex vertices[] = {
-    { 0.0f,  1.0f,  phi,  0.0f,  inv_length,  phi * inv_length},
-    { 0.0f, -1.0f,  phi,  0.0f, -inv_length,  phi * inv_length},
-    { 0.0f,  1.0f, -phi,  0.0f,  inv_length, -phi * inv_length},
-    { 0.0f, -1.0f, -phi,  0.0f, -inv_length, -phi * inv_length},
+    makeVertex( 0.0f,  1.0f,  phi,  0.0f,  inv_length,  phi * inv_length),
+    makeVertex( 0.0f, -1.0f,  phi,  0.0f, -inv_length,  phi * inv_length),
+    makeVertex( 0.0f,  1.0f, -phi,  0.0f,  inv_length, -phi * inv_length),
+    makeVertex( 0.0f, -1.0f, -phi,  0.0f, -inv_length, -phi * inv_length),
 
-    { 1.0f,  phi, 0.0f,  inv_length,  phi * inv_length, 0.0f},
-    {-1.0f,  phi, 0.0f, -inv_length,  phi * inv_length, 0.0f},
-    { 1.0f, -phi, 0.0f,  inv_length, -phi * inv_length, 0.0f},
-    {-1.0f, -phi, 0.0f, -inv_length, -phi * inv_length, 0.0f},
+    makeVertex( 1.0f,  phi, 0.0f,  inv_length,  phi * inv_length, 0.0f),
+    makeVertex(-1.0f,  phi, 0.0f, -inv_length,  phi * inv_length, 0.0f),
+    makeVertex( 1.0f, -phi, 0.0f,  inv_length, -phi * inv_length, 0.0f),
+    makeVertex(-1.0f, -phi, 0.0f, -inv_length, -phi * inv_length, 0.0f),
 
-    { phi, 0.0f,  1.0f,  phi * inv_length, 0.0f,  inv_length},
-    { phi, 0.0f, -1.0f,  phi * inv_length, 0.0f, -inv_length},
-    {-phi, 0.0f,  1.0f, -phi * inv_length, 0.0f,  inv_length},
-    {-phi, 0.0f, -1.0f, -phi * inv_length, 0.0f, -inv_length}
+    makeVertex( phi, 0.0f,  1.0f,  phi * inv_length, 0.0f,  inv_length),
+    makeVertex( phi, 0.0f, -1.0f,  phi * inv_length, 0.0f, -inv_length),
+    makeVertex(-phi, 0.0f,  1.0f, -phi * inv_length, 0.0f,  inv_length),
+    makeVertex(-phi, 0.0f, -1.0f, -phi * inv_length, 0.0f, -inv_length)
 };
 
 const uint32_t indices[] = {
@@ -113,6 +128,36 @@ const uint32_t indices[] = {
     9, 3, 2,
     2, 3, 11
 };
+
+struct TextureResource {
+    stbi_uc* pixels = nullptr;
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+	VkFormat format = VK_FORMAT_R8G8B8A8_SRGB;
+
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation image_allocation = VK_NULL_HANDLE;
+    VkImageView image_view = VK_NULL_HANDLE;
+    VkSampler sampler = VK_NULL_HANDLE;
+};
+
+TextureResource specular_texture;
+TextureResource emissive_texture;
+
+struct SamplingPushConstants {
+    int enabled = 1;
+    float time = 0.0f;
+    float strength = 0.015f;
+};
+
+bool texture_sampling_enabled = true;
+float texture_sampling_time = 0.0f;
+constexpr size_t TEXTURE_COUNT = 3;
+TextureResource textures[TEXTURE_COUNT];
+
+int selected_texture_1 = 0;
+int selected_texture_2 = 1;
 
 VkBuffer vertex_buffer = VK_NULL_HANDLE;
 VmaAllocation vertex_buffer_allocation = VK_NULL_HANDLE;
@@ -160,11 +205,11 @@ std::vector<LightMarker> light_markers;
 VkBuffer scene_uniform_buffer = VK_NULL_HANDLE;
 VmaAllocation scene_uniform_buffer_allocation = VK_NULL_HANDLE;
 
-VkBuffer uniform_buffer = VK_NULL_HANDLE;
-VmaAllocation uniform_buffer_allocation = VK_NULL_HANDLE;
+// Общий динамический uniform buffer для всех моделей
+VkBuffer model_dynamic_uniform_buffer = VK_NULL_HANDLE;
+VmaAllocation model_dynamic_uniform_buffer_allocation = VK_NULL_HANDLE;
 
-VkBuffer uniform_buffer_2 = VK_NULL_HANDLE;
-VmaAllocation uniform_buffer_allocation_2 = VK_NULL_HANDLE;
+VkDeviceSize model_uniform_stride = 0;
 
 VkDescriptorSetLayout descriptor_set_layout = VK_NULL_HANDLE;
 VkDescriptorSetLayout model_descriptor_set_layout = VK_NULL_HANDLE;
@@ -219,7 +264,7 @@ float material_shininess = 32.0f;
 bool show_light_visualization = true;
 
 
-std::vector<PointLight> point_lights = {
+std::vector<PointLight> point_lights = {	// положение в простаранстве, цвет, интенсивность
     {
         glm::vec4(3.0f, 2.0f, 3.0f, 1.0f),
         glm::vec4(1.0f, 0.4f, 0.2f, 1.0f)
@@ -285,6 +330,382 @@ bool createBuffer(
 	return true;
 }
 
+bool createDeviceBuffer(
+    VkDeviceSize size,
+    VkBufferUsageFlags usage,
+    const void* data,
+    VkBuffer& buffer,
+    VmaAllocation& allocation)
+{
+    auto& context = graphics::internal::context;
+
+    VkBuffer staging_buffer = VK_NULL_HANDLE;
+    VmaAllocation staging_allocation = VK_NULL_HANDLE;
+
+    if (!createBuffer(
+            size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            data,
+            staging_buffer,
+            staging_allocation)) {
+        return false;
+    }
+
+    VkBufferCreateInfo buffer_info{};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = size;
+    buffer_info.usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo allocation_info{};
+    allocation_info.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    if (vmaCreateBuffer(
+            context.allocator,
+            &buffer_info,
+            &allocation_info,
+            &buffer,
+            &allocation,
+            nullptr) != VK_SUCCESS) {
+        vmaDestroyBuffer(
+            context.allocator,
+            staging_buffer,
+            staging_allocation);
+        return false;
+    }
+
+    VkCommandPool command_pool = VK_NULL_HANDLE;
+
+    VkCommandPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pool_info.queueFamilyIndex = context.graphics_queue_index;
+
+    if (vkCreateCommandPool(
+            context.device,
+            &pool_info,
+            nullptr,
+            &command_pool) != VK_SUCCESS) {
+        vmaDestroyBuffer(context.allocator, staging_buffer, staging_allocation);
+        vmaDestroyBuffer(context.allocator, buffer, allocation);
+        buffer = VK_NULL_HANDLE;
+        allocation = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+
+    VkCommandBufferAllocateInfo command_info{};
+    command_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    command_info.commandPool = command_pool;
+    command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    command_info.commandBufferCount = 1;
+
+    if (vkAllocateCommandBuffers(
+            context.device,
+            &command_info,
+            &command_buffer) != VK_SUCCESS) {
+        vkDestroyCommandPool(context.device, command_pool, nullptr);
+        vmaDestroyBuffer(context.allocator, staging_buffer, staging_allocation);
+        vmaDestroyBuffer(context.allocator, buffer, allocation);
+        buffer = VK_NULL_HANDLE;
+        allocation = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkCommandBufferBeginInfo begin_info{};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    if (vkBeginCommandBuffer(command_buffer, &begin_info) != VK_SUCCESS) {
+        vkDestroyCommandPool(context.device, command_pool, nullptr);
+        vmaDestroyBuffer(context.allocator, staging_buffer, staging_allocation);
+        vmaDestroyBuffer(context.allocator, buffer, allocation);
+        buffer = VK_NULL_HANDLE;
+        allocation = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkBufferCopy copy_region{};
+    copy_region.size = size;
+
+    vkCmdCopyBuffer(
+        command_buffer,
+        staging_buffer,
+        buffer,
+        1,
+        &copy_region);
+
+    if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS) {
+        vkDestroyCommandPool(context.device, command_pool, nullptr);
+        vmaDestroyBuffer(context.allocator, staging_buffer, staging_allocation);
+        vmaDestroyBuffer(context.allocator, buffer, allocation);
+        buffer = VK_NULL_HANDLE;
+        allocation = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkSubmitInfo submit_info{};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &command_buffer;
+
+    VkResult result = vkQueueSubmit(
+        context.graphics_queue,
+        1,
+        &submit_info,
+        VK_NULL_HANDLE);
+
+    if (result == VK_SUCCESS) {
+        result = vkQueueWaitIdle(context.graphics_queue);
+    }
+
+    vkDestroyCommandPool(context.device, command_pool, nullptr);
+    vmaDestroyBuffer(context.allocator, staging_buffer, staging_allocation);
+
+    if (result != VK_SUCCESS) {
+        vmaDestroyBuffer(context.allocator, buffer, allocation);
+        buffer = VK_NULL_HANDLE;
+        allocation = VK_NULL_HANDLE;
+        return false;
+    }
+
+    return true;
+}
+
+bool createTextureImage(TextureResource& texture)
+{
+    auto& context = graphics::internal::context;
+
+    VkDeviceSize image_size =
+        static_cast<VkDeviceSize>(texture.width) *
+        texture.height * 4;
+
+    VkBuffer staging_buffer = VK_NULL_HANDLE;
+    VmaAllocation staging_allocation = VK_NULL_HANDLE;
+
+    if (!createBuffer(
+        image_size,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        texture.pixels,
+        staging_buffer,
+        staging_allocation))
+    {
+        return false;
+    }
+
+    VkImageCreateInfo image_info{};
+    image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.extent.width = texture.width;
+    image_info.extent.height = texture.height;
+    image_info.extent.depth = 1;
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.format = texture.format;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    image_info.usage =
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+        VK_IMAGE_USAGE_SAMPLED_BIT;
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo allocation_info{};
+    allocation_info.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+    if (vmaCreateImage(
+        context.allocator,
+        &image_info,
+        &allocation_info,
+        &texture.image,
+        &texture.image_allocation,
+        nullptr) != VK_SUCCESS)
+    {
+        vmaDestroyBuffer(context.allocator, staging_buffer, staging_allocation);
+        return false;
+    }
+
+    VkCommandPool command_pool = VK_NULL_HANDLE;
+
+    VkCommandPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pool_info.queueFamilyIndex = context.graphics_queue_index;
+
+    if (vkCreateCommandPool(
+        context.device, &pool_info, nullptr, &command_pool) != VK_SUCCESS)
+    {
+        vmaDestroyBuffer(context.allocator, staging_buffer, staging_allocation);
+        return false;
+    }
+
+    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+
+    VkCommandBufferAllocateInfo command_info{};
+    command_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    command_info.commandPool = command_pool;
+    command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    command_info.commandBufferCount = 1;
+
+    if (vkAllocateCommandBuffers(
+        context.device, &command_info, &command_buffer) != VK_SUCCESS)
+    {
+        vkDestroyCommandPool(context.device, command_pool, nullptr);
+        vmaDestroyBuffer(context.allocator, staging_buffer, staging_allocation);
+        return false;
+    }
+
+    VkCommandBufferBeginInfo begin_info{};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    if (vkBeginCommandBuffer(command_buffer, &begin_info) != VK_SUCCESS)
+    {
+        vkDestroyCommandPool(context.device, command_pool, nullptr);
+        vmaDestroyBuffer(context.allocator, staging_buffer, staging_allocation);
+        return false;
+    }
+
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = texture.image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+    vkCmdPipelineBarrier(
+        command_buffer,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    VkBufferImageCopy copy_region{};
+    copy_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copy_region.imageSubresource.mipLevel = 0;
+    copy_region.imageSubresource.baseArrayLayer = 0;
+    copy_region.imageSubresource.layerCount = 1;
+    copy_region.imageExtent = {
+        static_cast<uint32_t>(texture.width),
+        static_cast<uint32_t>(texture.height),
+        1
+    };
+
+    vkCmdCopyBufferToImage(
+        command_buffer,
+        staging_buffer,
+        texture.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &copy_region);
+
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    vkCmdPipelineBarrier(
+        command_buffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    if (vkEndCommandBuffer(command_buffer) != VK_SUCCESS)
+    {
+        vkDestroyCommandPool(context.device, command_pool, nullptr);
+        vmaDestroyBuffer(context.allocator, staging_buffer, staging_allocation);
+        return false;
+    }
+
+    VkSubmitInfo submit_info{};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &command_buffer;
+
+    VkResult result = vkQueueSubmit(
+        context.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+
+    if (result == VK_SUCCESS)
+        result = vkQueueWaitIdle(context.graphics_queue);
+
+    vkDestroyCommandPool(context.device, command_pool, nullptr);
+    vmaDestroyBuffer(context.allocator, staging_buffer, staging_allocation);
+
+    return result == VK_SUCCESS;
+}
+
+bool createTextureImageView(TextureResource& texture)
+{
+    auto& context = graphics::internal::context;
+
+    VkImageViewCreateInfo view_info{};
+    view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = texture.image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = texture.format;
+
+    view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    view_info.subresourceRange.baseMipLevel = 0;
+    view_info.subresourceRange.levelCount = 1;
+    view_info.subresourceRange.baseArrayLayer = 0;
+    view_info.subresourceRange.layerCount = 1;
+
+    if (vkCreateImageView(
+        context.device,
+        &view_info,
+        nullptr,
+        &texture.image_view) != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool createTextureSampler(TextureResource& texture)
+{
+    auto& context = graphics::internal::context;
+
+    VkSamplerCreateInfo sampler_info{};
+    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+
+    sampler_info.magFilter = VK_FILTER_LINEAR;
+    sampler_info.minFilter = VK_FILTER_LINEAR;
+
+    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+
+    sampler_info.anisotropyEnable = VK_FALSE;
+    sampler_info.maxAnisotropy = 1.0f;
+
+    sampler_info.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    sampler_info.unnormalizedCoordinates = VK_FALSE;
+
+    sampler_info.compareEnable = VK_FALSE;
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    sampler_info.minLod = 0.0f;
+    sampler_info.maxLod = 0.0f;
+
+    if (vkCreateSampler(
+        context.device,
+        &sampler_info,
+        nullptr,
+        &texture.sampler) != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    return true;
+}
+
 bool createLightSphereGeometry()
 {
     constexpr uint32_t segments = 16;
@@ -307,9 +728,10 @@ bool createLightSphereGeometry()
             float z = std::sin(theta) * std::sin(phi);
 
             sphere_vertices.push_back({
-                x, y, z,
-                x, y, z
-            });
+				x, y, z,
+				x, y, z,
+				0.0f, 0.0f
+			});
         }
     }
 
@@ -328,7 +750,7 @@ bool createLightSphereGeometry()
         }
     }
 
-    if (!createBuffer(
+    if (!createDeviceBuffer(
             sphere_vertices.size() * sizeof(Vertex),
             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
             sphere_vertices.data(),
@@ -337,7 +759,7 @@ bool createLightSphereGeometry()
         return false;
     }
 
-    if (!createBuffer(
+    if (!createDeviceBuffer(
             sphere_indices.size() * sizeof(uint32_t),
             VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
             sphere_indices.data(),
@@ -737,50 +1159,40 @@ void updateUniformBuffer()
         scene_uniform_buffer_allocation
     );
 
-    ModelUniformData model_data = createModelUniformData();
+    
 
-    if (vmaMapMemory(
-            context.allocator,
-            uniform_buffer_allocation,
-            &mapped_data) != VK_SUCCESS) {
-        return;
-    }
+	ModelUniformData model_data = createModelUniformData();
 
-    std::memcpy(
-        mapped_data,
-        &model_data,
-        sizeof(ModelUniformData)
-    );
+	ModelUniformData model_data_2 = createModelUniformData();
 
-    vmaUnmapMemory(
-        context.allocator,
-        uniform_buffer_allocation
-    );
+	model_data_2.model = glm::translate(
+		glm::mat4(1.0f),
+		glm::vec3(2.0f, 0.0f, -2.0f)
+	);
 
-    ModelUniformData model_data_2 = createModelUniformData();
+	if (vmaMapMemory(
+			context.allocator,
+			model_dynamic_uniform_buffer_allocation,
+			&mapped_data) != VK_SUCCESS) {
+		return;
+	}
 
-    model_data_2.model = glm::translate(
-        glm::mat4(1.0f),
-        glm::vec3(2.0f, 0.0f, -2.0f)
-    );
+	std::memcpy(
+		mapped_data,
+		&model_data,
+		sizeof(ModelUniformData)
+	);
 
-    if (vmaMapMemory(
-            context.allocator,
-            uniform_buffer_allocation_2,
-            &mapped_data) != VK_SUCCESS) {
-        return;
-    }
+	std::memcpy(
+		static_cast<unsigned char*>(mapped_data) + model_uniform_stride,
+		&model_data_2,
+		sizeof(ModelUniformData)
+	);
 
-    std::memcpy(
-        mapped_data,
-        &model_data_2,
-        sizeof(ModelUniformData)
-    );
-
-    vmaUnmapMemory(
-        context.allocator,
-        uniform_buffer_allocation_2
-    );
+	vmaUnmapMemory(
+		context.allocator,
+		model_dynamic_uniform_buffer_allocation
+	);
 
 	updatePointLightBuffer();
 	updateSpotLightBuffer();
@@ -854,16 +1266,33 @@ bool syncLightMarkers()
         write.dstSet = marker.descriptor_set;
         write.dstBinding = 0;
         write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         write.pBufferInfo = &buffer_info;
 
-        vkUpdateDescriptorSets(
-            context.device,
-            1,
-            &write,
-            0,
-            nullptr
-        );
+		VkDescriptorImageInfo texture_image_info{};
+		texture_image_info.sampler = textures[0].sampler;
+		texture_image_info.imageView = textures[0].image_view;
+		texture_image_info.imageLayout =
+			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+		VkWriteDescriptorSet texture_write{};
+		texture_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		texture_write.dstSet = marker.descriptor_set;
+		texture_write.dstBinding = 1;
+		texture_write.descriptorCount = 1;
+		texture_write.descriptorType =
+			VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		texture_write.pImageInfo = &texture_image_info;
+
+        VkWriteDescriptorSet writes[] = { write, texture_write };
+
+		vkUpdateDescriptorSets(
+			context.device,
+			2,
+			writes,
+			0,
+			nullptr
+		);
 
         light_markers.push_back(marker);
     }
@@ -954,6 +1383,17 @@ namespace application {
 bool initialize() {
 
 	auto& context = graphics::internal::context;
+	VkPhysicalDeviceProperties device_properties{};
+	vkGetPhysicalDeviceProperties(
+		context.physical_device,
+		&device_properties
+	);
+
+	const VkDeviceSize alignment =
+		device_properties.limits.minUniformBufferOffsetAlignment;
+
+	model_uniform_stride =
+		(sizeof(ModelUniformData) + alignment - 1) / alignment * alignment;
 
 	auto cleanup = [&]() {
 
@@ -1098,25 +1538,16 @@ bool initialize() {
 		scene_uniform_buffer_allocation = VK_NULL_HANDLE;
 		}
 
-		if (uniform_buffer != VK_NULL_HANDLE) {
+		if (model_dynamic_uniform_buffer != VK_NULL_HANDLE) {
 		vmaDestroyBuffer(
 			context.allocator,
-			uniform_buffer,
-			uniform_buffer_allocation);
+			model_dynamic_uniform_buffer,
+			model_dynamic_uniform_buffer_allocation
+		);
 
-		uniform_buffer = VK_NULL_HANDLE;
-		uniform_buffer_allocation = VK_NULL_HANDLE;
-		}
-
-		if (uniform_buffer_2 != VK_NULL_HANDLE) {
-		vmaDestroyBuffer(
-			context.allocator,
-			uniform_buffer_2,
-			uniform_buffer_allocation_2);
-
-		uniform_buffer_2 = VK_NULL_HANDLE;
-		uniform_buffer_allocation_2 = VK_NULL_HANDLE;
-		}
+		model_dynamic_uniform_buffer = VK_NULL_HANDLE;
+		model_dynamic_uniform_buffer_allocation = VK_NULL_HANDLE;
+	}
 
 		if (point_light_buffer != VK_NULL_HANDLE) {
 			vmaDestroyBuffer(
@@ -1138,31 +1569,187 @@ bool initialize() {
 			spot_light_buffer = VK_NULL_HANDLE;
 			spot_light_buffer_allocation = VK_NULL_HANDLE;
 		}
+
+		for (size_t i = 0; i < TEXTURE_COUNT; ++i)
+		{
+			TextureResource& texture = textures[i];
+
+			if (texture.sampler != VK_NULL_HANDLE)
+			{
+				vkDestroySampler(context.device, texture.sampler, nullptr);
+				texture.sampler = VK_NULL_HANDLE;
+			}
+
+			if (texture.image_view != VK_NULL_HANDLE)
+			{
+				vkDestroyImageView(context.device, texture.image_view, nullptr);
+				texture.image_view = VK_NULL_HANDLE;
+			}
+
+			if (texture.image != VK_NULL_HANDLE)
+			{
+				vmaDestroyImage(
+					context.allocator,
+					texture.image,
+					texture.image_allocation
+				);
+
+				texture.image = VK_NULL_HANDLE;
+				texture.image_allocation = VK_NULL_HANDLE;
+			}
+
+			if (texture.pixels != nullptr)
+			{
+				stbi_image_free(texture.pixels);
+				texture.pixels = nullptr;
+			}
+		}
+
+		auto cleanup_material_texture = [&](TextureResource& texture)
+		{
+			if (texture.sampler != VK_NULL_HANDLE)
+				vkDestroySampler(context.device, texture.sampler, nullptr);
+
+			if (texture.image_view != VK_NULL_HANDLE)
+				vkDestroyImageView(context.device, texture.image_view, nullptr);
+
+			if (texture.image != VK_NULL_HANDLE)
+				vmaDestroyImage(
+					context.allocator,
+					texture.image,
+					texture.image_allocation
+				);
+
+			if (texture.pixels != nullptr)
+				stbi_image_free(texture.pixels);
+
+			texture = {};
+		};
+
+		cleanup_material_texture(specular_texture);
+		cleanup_material_texture(emissive_texture);
 	};
 
-	if (!createBuffer(
-			sizeof(vertices),
-			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-			vertices,
-			vertex_buffer,
-			vertex_buffer_allocation)) {
+	const char* texture_paths[TEXTURE_COUNT] = {
+		"../textures/albedo.png",
+		"../textures/albedo_2.png",
+		"../textures/albedo_3.png"
+	};
 
-		std::cerr << "FAILED: vertex buffer\n";
-		cleanup();
+	const char* material_texture_paths[2] = {
+		"../textures/specular.png",
+		"../textures/emissive.png"
+	};
+
+	TextureResource* material_textures[2] = {
+		&specular_texture,
+		&emissive_texture
+	};
+
+	specular_texture.format = VK_FORMAT_R8G8B8A8_UNORM;
+
+	for (size_t i = 0; i < TEXTURE_COUNT; ++i)
+	{
+		TextureResource& texture = textures[i];
+
+		texture.pixels = stbi_load(
+			texture_paths[i],
+			&texture.width,
+			&texture.height,
+			&texture.channels,
+			STBI_rgb_alpha
+		);
+
+		if (texture.pixels == nullptr)
+		{
+			std::cerr << "FAILED to load texture "
+					<< texture_paths[i] << ": "
+					<< stbi_failure_reason() << '\n';
+			cleanup();
+			return false;
+		}
+
+		std::cout << "Texture loaded: "
+				<< texture_paths[i] << " "
+				<< texture.width << "x"
+				<< texture.height << '\n';
+
+		if (!createTextureImage(texture))
+		{
+			std::cerr << "FAILED to create texture image\n";
+			cleanup();
+			return false;
+		}
+
+		if (!createTextureImageView(texture))
+		{
+			std::cerr << "FAILED to create texture image view\n";
+			cleanup();
+			return false;
+		}
+
+		if (!createTextureSampler(texture))
+		{
+			std::cerr << "FAILED to create texture sampler\n";
+			cleanup();
+			return false;
+		}
+
+		stbi_image_free(texture.pixels);
+		texture.pixels = nullptr;
+	}
+
+	for (int i = 0; i < 2; ++i)
+	{
+		TextureResource& texture = *material_textures[i];
+
+		texture.pixels = stbi_load(
+			material_texture_paths[i],
+			&texture.width,
+			&texture.height,
+			&texture.channels,
+			STBI_rgb_alpha
+		);
+
+		if (texture.pixels == nullptr)
+		{
+			std::cerr << "FAILED to load material texture "
+					<< material_texture_paths[i] << ": "
+					<< stbi_failure_reason() << '\n';
+			cleanup();
+			return false;
+		}
+
+		if (!createTextureImage(texture) ||
+			!createTextureImageView(texture) ||
+			!createTextureSampler(texture))
+		{
+			std::cerr << "FAILED to create material texture\n";
+			cleanup();
+			return false;
+		}
+
+		stbi_image_free(texture.pixels);
+		texture.pixels = nullptr;
+	}
+
+	if (!createDeviceBuffer(
+		sizeof(vertices),
+		VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+		vertices,
+		vertex_buffer,
+		vertex_buffer_allocation)) {
 		return false;
 	}
 
-	if (!createBuffer(
-			sizeof(indices),
-			VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-			indices,
-			index_buffer,
-			index_buffer_allocation)) {
-		std::cerr << "FAILED: index buffer\n";
-		cleanup();
+	if (!createDeviceBuffer(
+		sizeof(indices),
+		VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+		indices,
+		index_buffer,
+		index_buffer_allocation)) {
 		return false;
 	}
-
 	if (!createLightSphereGeometry()) {
 		std::cerr << "FAILED: light sphere geometry\n";
 		cleanup();
@@ -1190,18 +1777,6 @@ bool initialize() {
 		glm::vec3(-2.0f, 0.0f, -2.0f)
 	);
 
-	if (!createBuffer(
-			sizeof(ModelUniformData),
-			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-			&model_data,
-			uniform_buffer,
-			uniform_buffer_allocation)) {
-
-		std::cerr << "FAILED: model uniform buffer\n";
-		cleanup();
-		return false;
-	}
-
 	ModelUniformData model_data_2 = createModelUniformData();
 
 	model_data_2.model = glm::translate(
@@ -1209,14 +1784,31 @@ bool initialize() {
 		glm::vec3(2.0f, 0.0f, -2.0f)
 	);
 
-	if (!createBuffer(
-			sizeof(ModelUniformData),
-			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-			&model_data_2,
-			uniform_buffer_2,
-			uniform_buffer_allocation_2)) {
+	std::vector<unsigned char> model_buffer_data(
+		static_cast<size_t>(model_uniform_stride * 2),
+		0
+	);
 
-		std::cerr << "FAILED: model uniform buffer 2\n";
+	std::memcpy(
+		model_buffer_data.data(),
+		&model_data,
+		sizeof(ModelUniformData)
+	);
+
+	std::memcpy(
+		model_buffer_data.data() + model_uniform_stride,
+		&model_data_2,
+		sizeof(ModelUniformData)
+	);
+
+	if (!createBuffer(
+			model_uniform_stride * 2,
+			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+			model_buffer_data.data(),
+			model_dynamic_uniform_buffer,
+			model_dynamic_uniform_buffer_allocation)) {
+
+		std::cerr << "FAILED: dynamic model uniform buffer\n";
 		cleanup();
 		return false;
 	}
@@ -1225,7 +1817,7 @@ bool initialize() {
 	PointLightBufferData point_light_data =
 		createPointLightBufferData();
 
-	if (!createBuffer(
+	if (!createDeviceBuffer(
 			sizeof(PointLightBufferData),
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
 			&point_light_data,
@@ -1240,7 +1832,7 @@ bool initialize() {
 	SpotLightBufferData spot_light_data =
 		createSpotLightBufferData();
 
-	if (!createBuffer(
+	if (!createDeviceBuffer(
 			sizeof(SpotLightBufferData),
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
 			&spot_light_data,
@@ -1346,19 +1938,41 @@ bool initialize() {
 		return false;
 	}
 
-	VkDescriptorSetLayoutBinding model_binding{};
+	VkDescriptorSetLayoutBinding model_bindings[4]{};
 
-	model_binding.binding = 0;
-	model_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	model_binding.descriptorCount = 1;
-	model_binding.stageFlags =
+	// Binding 0: свойства модели
+	model_bindings[0].binding = 0;
+	model_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+	model_bindings[0].descriptorCount = 1;
+	model_bindings[0].stageFlags =
 		VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+	// Binding 1: текстура модели
+	model_bindings[1].binding = 1;
+	model_bindings[1].descriptorType =
+		VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	model_bindings[1].descriptorCount = 1;
+	model_bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+	// Binding 2: specular texture
+	model_bindings[2].binding = 2;
+	model_bindings[2].descriptorType =
+		VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	model_bindings[2].descriptorCount = 1;
+	model_bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+	// Binding 3: emissive texture
+	model_bindings[3].binding = 3;
+	model_bindings[3].descriptorType =
+		VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	model_bindings[3].descriptorCount = 1;
+	model_bindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
 	VkDescriptorSetLayoutCreateInfo model_layout_info{};
 	model_layout_info.sType =
 		VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	model_layout_info.bindingCount = 1;
-	model_layout_info.pBindings = &model_binding;
+	model_layout_info.bindingCount = 4;
+	model_layout_info.pBindings = model_bindings;
 
 	if (vkCreateDescriptorSetLayout(
 			context.device,
@@ -1376,11 +1990,19 @@ bool initialize() {
 		model_descriptor_set_layout
 	};
 
+	VkPushConstantRange push_constant_range{};
+	push_constant_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+	push_constant_range.offset = 0;
+	push_constant_range.size = sizeof(SamplingPushConstants);
+
 	VkPipelineLayoutCreateInfo pipeline_layout_info{};
 	pipeline_layout_info.sType =
 		VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 	pipeline_layout_info.setLayoutCount = 2;
 	pipeline_layout_info.pSetLayouts = pipeline_layouts;
+	pipeline_layout_info.pushConstantRangeCount = 1;
+	pipeline_layout_info.pPushConstantRanges = &push_constant_range;
+
 
 	if (vkCreatePipelineLayout(
 			context.device,
@@ -1393,7 +2015,7 @@ bool initialize() {
 		return false;
 	}
 	
-	VkDescriptorPoolSize pool_sizes[2]{};
+	VkDescriptorPoolSize pool_sizes[4]{};
 
 	pool_sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	pool_sizes[0].descriptorCount = 64;
@@ -1401,10 +2023,16 @@ bool initialize() {
 	pool_sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	pool_sizes[1].descriptorCount = 2;
 
+	pool_sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+	pool_sizes[2].descriptorCount = 64;
+
+	pool_sizes[3].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	pool_sizes[3].descriptorCount = 192;
+
 	VkDescriptorPoolCreateInfo pool_info{};
 	pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	pool_info.maxSets = 64;
-	pool_info.poolSizeCount = 2;
+	pool_info.poolSizeCount = 4;
 	pool_info.pPoolSizes = pool_sizes;
 
 	if (vkCreateDescriptorPool(
@@ -1453,14 +2081,9 @@ bool initialize() {
 	scene_buffer_info.range = sizeof(SceneUniformData);
 
 	VkDescriptorBufferInfo model_buffer_info{};
-	model_buffer_info.buffer = uniform_buffer;
+	model_buffer_info.buffer = model_dynamic_uniform_buffer;
 	model_buffer_info.offset = 0;
 	model_buffer_info.range = sizeof(ModelUniformData);
-
-	VkDescriptorBufferInfo model_buffer_info_2{};
-	model_buffer_info_2.buffer = uniform_buffer_2;
-	model_buffer_info_2.offset = 0;
-	model_buffer_info_2.range = sizeof(ModelUniformData);
 
 	VkDescriptorBufferInfo point_light_buffer_info{};
 	point_light_buffer_info.buffer = point_light_buffer;
@@ -1472,7 +2095,31 @@ bool initialize() {
 	spot_light_buffer_info.offset = 0;
 	spot_light_buffer_info.range = sizeof(SpotLightBufferData);
 
-	VkWriteDescriptorSet descriptor_writes[5]{};
+	VkWriteDescriptorSet descriptor_writes[11]{};
+
+	VkDescriptorImageInfo texture_image_info_1{};
+	texture_image_info_1.sampler = textures[0].sampler;
+	texture_image_info_1.imageView = textures[0].image_view;
+	texture_image_info_1.imageLayout =
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	VkDescriptorImageInfo texture_image_info_2{};
+	texture_image_info_2.sampler = textures[1].sampler;
+	texture_image_info_2.imageView = textures[1].image_view;
+	texture_image_info_2.imageLayout =
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	VkDescriptorImageInfo specular_image_info{};
+	specular_image_info.sampler = specular_texture.sampler;
+	specular_image_info.imageView = specular_texture.image_view;
+	specular_image_info.imageLayout =
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	VkDescriptorImageInfo emissive_image_info{};
+	emissive_image_info.sampler = emissive_texture.sampler;
+	emissive_image_info.imageView = emissive_texture.image_view;
+	emissive_image_info.imageLayout =
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 	descriptor_writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	descriptor_writes[0].dstSet = scene_descriptor_set;
@@ -1488,33 +2135,76 @@ bool initialize() {
 	descriptor_writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	descriptor_writes[1].pBufferInfo = &point_light_buffer_info;
 
-	descriptor_writes[2].sType =
-		VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptor_writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	descriptor_writes[2].dstSet = scene_descriptor_set;
 	descriptor_writes[2].dstBinding = 2;
 	descriptor_writes[2].descriptorCount = 1;
-	descriptor_writes[2].descriptorType =
-		VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	descriptor_writes[2].pBufferInfo =
-		&spot_light_buffer_info;
+	descriptor_writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	descriptor_writes[2].pBufferInfo = &spot_light_buffer_info;
 
 	descriptor_writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	descriptor_writes[3].dstSet = descriptor_set;
 	descriptor_writes[3].dstBinding = 0;
 	descriptor_writes[3].descriptorCount = 1;
-	descriptor_writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	descriptor_writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 	descriptor_writes[3].pBufferInfo = &model_buffer_info;
 
 	descriptor_writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	descriptor_writes[4].dstSet = descriptor_set_2;
 	descriptor_writes[4].dstBinding = 0;
 	descriptor_writes[4].descriptorCount = 1;
-	descriptor_writes[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	descriptor_writes[4].pBufferInfo = &model_buffer_info_2;
+	descriptor_writes[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+	descriptor_writes[4].pBufferInfo = &model_buffer_info;
+
+	descriptor_writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptor_writes[5].dstSet = descriptor_set;
+	descriptor_writes[5].dstBinding = 1;
+	descriptor_writes[5].descriptorCount = 1;
+	descriptor_writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	descriptor_writes[5].pImageInfo = &texture_image_info_1;
+
+	descriptor_writes[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptor_writes[6].dstSet = descriptor_set_2;
+	descriptor_writes[6].dstBinding = 1;
+	descriptor_writes[6].descriptorCount = 1;
+	descriptor_writes[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	descriptor_writes[6].pImageInfo = &texture_image_info_2;
+
+	// Specular texture для первого объекта
+	descriptor_writes[7].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptor_writes[7].dstSet = descriptor_set;
+	descriptor_writes[7].dstBinding = 2;
+	descriptor_writes[7].descriptorCount = 1;
+	descriptor_writes[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	descriptor_writes[7].pImageInfo = &specular_image_info;
+
+	// Emissive texture для первого объекта
+	descriptor_writes[8].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptor_writes[8].dstSet = descriptor_set;
+	descriptor_writes[8].dstBinding = 3;
+	descriptor_writes[8].descriptorCount = 1;
+	descriptor_writes[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	descriptor_writes[8].pImageInfo = &emissive_image_info;
+
+	// Specular texture для второго объекта
+	descriptor_writes[9].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptor_writes[9].dstSet = descriptor_set_2;
+	descriptor_writes[9].dstBinding = 2;
+	descriptor_writes[9].descriptorCount = 1;
+	descriptor_writes[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	descriptor_writes[9].pImageInfo = &specular_image_info;
+
+	// Emissive texture для второго объекта
+	descriptor_writes[10].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptor_writes[10].dstSet = descriptor_set_2;
+	descriptor_writes[10].dstBinding = 3;
+	descriptor_writes[10].descriptorCount = 1;
+	descriptor_writes[10].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	descriptor_writes[10].pImageInfo = &emissive_image_info;
 
 	vkUpdateDescriptorSets(
 		context.device,
-		5,
+		11,
 		descriptor_writes,
 		0,
 		nullptr
@@ -1534,7 +2224,7 @@ bool initialize() {
 	binding_description.inputRate =
 		VK_VERTEX_INPUT_RATE_VERTEX;
 
-	VkVertexInputAttributeDescription attribute_descriptions[2]{};
+	VkVertexInputAttributeDescription attribute_descriptions[3]{};
 
 	// атрибут 0: позиция вершины
 	attribute_descriptions[0].binding = 0;
@@ -1548,6 +2238,12 @@ bool initialize() {
 	attribute_descriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
 	attribute_descriptions[1].offset = offsetof(Vertex, nx);
 
+	// атрибут 2: текстурные координаты
+	attribute_descriptions[2].binding = 0;
+	attribute_descriptions[2].location = 2;
+	attribute_descriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
+	attribute_descriptions[2].offset = offsetof(Vertex, u);
+
 	VkPipelineVertexInputStateCreateInfo vertex_input_info{};
 	vertex_input_info.sType =
 		VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -1556,7 +2252,7 @@ bool initialize() {
 	vertex_input_info.pVertexBindingDescriptions =
 		&binding_description;
 
-	vertex_input_info.vertexAttributeDescriptionCount = 2;
+	vertex_input_info.vertexAttributeDescriptionCount = 3;
 	vertex_input_info.pVertexAttributeDescriptions =
 		attribute_descriptions;
 
@@ -1854,15 +2550,16 @@ void shutdown() {
 		light_sphere.index_buffer_allocation = VK_NULL_HANDLE;
 	}
 
-    vmaDestroyBuffer(
-        context.allocator,
-        uniform_buffer,
-        uniform_buffer_allocation);
+    if (model_dynamic_uniform_buffer != VK_NULL_HANDLE) {
+		vmaDestroyBuffer(
+			context.allocator,
+			model_dynamic_uniform_buffer,
+			model_dynamic_uniform_buffer_allocation
+		);
 
-    vmaDestroyBuffer(
-        context.allocator,
-        uniform_buffer_2,
-        uniform_buffer_allocation_2);
+		model_dynamic_uniform_buffer = VK_NULL_HANDLE;
+		model_dynamic_uniform_buffer_allocation = VK_NULL_HANDLE;
+	}
 
 	if (point_light_buffer != VK_NULL_HANDLE) {
         vmaDestroyBuffer(
@@ -1893,6 +2590,65 @@ void shutdown() {
             nullptr);
         descriptor_pool = VK_NULL_HANDLE;
     }
+
+	for (size_t i = 0; i < TEXTURE_COUNT; ++i)
+	{
+		TextureResource& texture = textures[i];
+
+		if (texture.sampler != VK_NULL_HANDLE)
+		{
+			vkDestroySampler(context.device, texture.sampler, nullptr);
+			texture.sampler = VK_NULL_HANDLE;
+		}
+
+		if (texture.image_view != VK_NULL_HANDLE)
+		{
+			vkDestroyImageView(context.device, texture.image_view, nullptr);
+			texture.image_view = VK_NULL_HANDLE;
+		}
+
+		if (texture.image != VK_NULL_HANDLE)
+		{
+			vmaDestroyImage(
+				context.allocator,
+				texture.image,
+				texture.image_allocation
+			);
+
+			texture.image = VK_NULL_HANDLE;
+			texture.image_allocation = VK_NULL_HANDLE;
+		}
+
+		if (texture.pixels != nullptr)
+		{
+			stbi_image_free(texture.pixels);
+			texture.pixels = nullptr;
+		}
+	}
+
+	auto cleanup_material_texture = [&](TextureResource& texture)
+	{
+		if (texture.sampler != VK_NULL_HANDLE)
+			vkDestroySampler(context.device, texture.sampler, nullptr);
+
+		if (texture.image_view != VK_NULL_HANDLE)
+			vkDestroyImageView(context.device, texture.image_view, nullptr);
+
+		if (texture.image != VK_NULL_HANDLE)
+			vmaDestroyImage(
+				context.allocator,
+				texture.image,
+				texture.image_allocation
+			);
+
+		if (texture.pixels != nullptr)
+			stbi_image_free(texture.pixels);
+
+		texture = {};
+	};
+
+	cleanup_material_texture(specular_texture);
+	cleanup_material_texture(emissive_texture);
 
     if (descriptor_set_layout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(
@@ -1980,8 +2736,83 @@ void update(double time)
         static_cast<float>(time - previous_time);
 
     previous_time = time;
+	texture_sampling_time = static_cast<float>(time);
 
     ImGui::Begin("Icosahedron");
+
+	const char* texture_names[] = {
+		"Albedo 1",
+		"Albedo 2",
+		"Albedo 3"
+	};
+
+	// Выбор текстуры первого икосаэдра
+	if (ImGui::Combo(
+		"Texture 1",
+		&selected_texture_1,
+		texture_names,
+		static_cast<int>(TEXTURE_COUNT)))
+	{
+		VkDescriptorImageInfo image_info{};
+		image_info.sampler = textures[selected_texture_1].sampler;
+		image_info.imageView = textures[selected_texture_1].image_view;
+		image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+		VkWriteDescriptorSet write{};
+		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		write.dstSet = descriptor_set;
+		write.dstBinding = 1;
+		write.descriptorCount = 1;
+		write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		write.pImageInfo = &image_info;
+
+		vkUpdateDescriptorSets(
+			graphics::internal::context.device,
+			1,
+			&write,
+			0,
+			nullptr
+		);
+	}
+
+	// Выбор текстуры второго икосаэдра
+	if (ImGui::Combo(
+		"Texture 2",
+		&selected_texture_2,
+		texture_names,
+		static_cast<int>(TEXTURE_COUNT)))
+	{
+		VkDescriptorImageInfo image_info{};
+		image_info.sampler = textures[selected_texture_2].sampler;
+		image_info.imageView = textures[selected_texture_2].image_view;
+		image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+		VkWriteDescriptorSet write{};
+		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		write.dstSet = descriptor_set_2;
+		write.dstBinding = 1;
+		write.descriptorCount = 1;
+		write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		write.pImageInfo = &image_info;
+
+		vkUpdateDescriptorSets(
+			graphics::internal::context.device,
+			1,
+			&write,
+			0,
+			nullptr
+		);
+	}
+
+	ImGui::Separator();
+	ImGui::Text("Texture Sampling");
+
+	ImGui::Checkbox(
+		"Enable UV distortion",
+		&texture_sampling_enabled
+	);
+
+	ImGui::Separator();
 
 	if (ImGui::CollapsingHeader(
 			"Camera",
@@ -2377,6 +3208,8 @@ void render(const graphics::internal::FrameData& fd)
 		descriptor_set
 	};
 
+	uint32_t first_dynamic_offset = 0;
+
 	vkCmdBindDescriptorSets(
 		fd.command_buffer,
 		VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2384,8 +3217,8 @@ void render(const graphics::internal::FrameData& fd)
 		0,
 		2,
 		descriptor_sets_first,
-		0,
-		nullptr
+		1,
+		&first_dynamic_offset
 	);
 
 	const VkDeviceSize offset = 0;
@@ -2403,6 +3236,21 @@ void render(const graphics::internal::FrameData& fd)
 		0,
 		VK_INDEX_TYPE_UINT32);
 
+
+	SamplingPushConstants sampling_data{};
+	sampling_data.enabled = texture_sampling_enabled ? 1 : 0;
+	sampling_data.time = texture_sampling_time;
+	sampling_data.strength = 0.015f;
+
+	vkCmdPushConstants(
+		fd.command_buffer,
+		pipeline_layout,
+		VK_SHADER_STAGE_FRAGMENT_BIT,
+		0,
+		sizeof(SamplingPushConstants),
+		&sampling_data
+	);
+
 	vkCmdDrawIndexed(
 		fd.command_buffer,
 		60,
@@ -2413,9 +3261,12 @@ void render(const graphics::internal::FrameData& fd)
 
 	
 	VkDescriptorSet descriptor_sets_second[] = {
-		scene_descriptor_set,
+    	scene_descriptor_set,
 		descriptor_set_2
 	};
+
+	uint32_t second_dynamic_offset =
+		static_cast<uint32_t>(model_uniform_stride);
 
 	vkCmdBindDescriptorSets(
 		fd.command_buffer,
@@ -2424,9 +3275,22 @@ void render(const graphics::internal::FrameData& fd)
 		0,
 		2,
 		descriptor_sets_second,
-		0,
-		nullptr);
+		1,
+		&second_dynamic_offset
+	);
 
+	sampling_data.enabled = texture_sampling_enabled ? 1 : 0;
+	sampling_data.time = texture_sampling_time;
+	sampling_data.strength = 0.015f;
+
+	vkCmdPushConstants(
+		fd.command_buffer,
+		pipeline_layout,
+		VK_SHADER_STAGE_FRAGMENT_BIT,
+		0,
+		sizeof(SamplingPushConstants),
+		&sampling_data
+	);
 
 	vkCmdDrawIndexed(
 		fd.command_buffer,
@@ -2487,8 +3351,8 @@ void render(const graphics::internal::FrameData& fd)
 				0,
 				2,
 				marker_descriptor_sets,
-				0,
-				nullptr
+				1,
+				&first_dynamic_offset
 			);
 
 			vkCmdDrawIndexed(

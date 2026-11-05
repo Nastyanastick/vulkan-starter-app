@@ -3,6 +3,7 @@
 layout(location = 0) in vec3 fragPosition;
 layout(location = 1) in vec3 vertexColor;
 layout(location = 2) in vec3 fragNormal;
+layout(location = 3) in vec2 fragTexCoord;
 
 layout(location = 0) out vec4 outColor;
 
@@ -49,11 +50,36 @@ layout(set = 1, binding = 0) uniform ModelUniformBuffer {
     vec4 material_specular;
 } modelData;
 
+layout(set = 1, binding = 1) uniform sampler2D albedoTexture;
+layout(set = 1, binding = 2) uniform sampler2D specularTexture;
+layout(set = 1, binding = 3) uniform sampler2D emissiveTexture;
+
+layout(push_constant) uniform SamplingPushConstants {
+    int enabled;
+    float time;
+    float strength;
+} sampling;
+
 void main()
 {
     vec3 N = normalize(fragNormal);
     vec3 V = normalize(scene.camera_position.xyz - fragPosition);
-    vec3 baseColor = modelData.color.rgb * vertexColor;
+
+    vec2 uv = fragTexCoord;
+
+    if (sampling.enabled != 0) {
+        uv.x += sin(uv.y * 20.0 + sampling.time * 2.0)
+              * sampling.strength;
+
+        uv.y += cos(uv.x * 20.0 + sampling.time * 2.0)
+              * sampling.strength;
+    }
+
+    vec3 baseColor = texture(albedoTexture, uv).rgb
+                   * modelData.color.rgb;
+
+    vec3 specularMap = texture(specularTexture, uv).rgb;
+    vec3 emissiveMap = texture(emissiveTexture, uv).rgb;
 
     vec3 ambient = baseColor
                  * scene.ambient.rgb
@@ -77,7 +103,8 @@ void main()
             max(modelData.material_specular.a, 1.0)
         );
 
-        specular = modelData.material_specular.rgb
+        specular = specularMap
+                 * modelData.material_specular.rgb
                  * scene.light_color.rgb
                  * scene.light_color.a
                  * specularFactor;
@@ -105,7 +132,8 @@ void main()
                     max(modelData.material_specular.a, 1.0)
                 );
 
-                pointSpecular = modelData.material_specular.rgb
+                pointSpecular = specularMap
+                              * modelData.material_specular.rgb
                               * light.color.rgb
                               * specularPoint;
             }
@@ -136,19 +164,12 @@ void main()
             vec3 direction = normalize(light.direction.xyz);
             vec3 fromLightToFragment = -Ls;
 
-            float theta = dot(
-                fromLightToFragment,
-                direction
-            );
+            float theta = dot(fromLightToFragment, direction);
 
             float innerCos = cos(radians(light.cone_angles.x));
             float outerCos = cos(radians(light.cone_angles.y));
 
-            float coneFactor = smoothstep(
-                outerCos,
-                innerCos,
-                theta
-            );
+            float coneFactor = smoothstep(outerCos, innerCos, theta);
 
             float attenuation =
                 1.0 / (distanceToLight * distanceToLight);
@@ -168,7 +189,8 @@ void main()
                     max(modelData.material_specular.a, 1.0)
                 );
 
-                spotSpecular = modelData.material_specular.rgb
+                spotSpecular = specularMap
+                             * modelData.material_specular.rgb
                              * light.color.rgb
                              * specularSpot;
             }
@@ -186,7 +208,8 @@ void main()
         + diffuse
         + specular
         + pointLighting
-        + spotLighting;
+        + spotLighting
+        + emissiveMap;
 
     outColor = vec4(result, 1.0);
 }
