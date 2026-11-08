@@ -79,7 +79,7 @@ void main()
                    * modelData.color.rgb;
 
     vec3 specularMap = texture(specularTexture, uv).rgb;
-    vec3 emissiveMap = texture(emissiveTexture, uv).rgb;
+    vec3 emissiveMap = texture(emissiveTexture, uv).rgb * 0.05;
 
     vec3 ambient = baseColor
                  * scene.ambient.rgb
