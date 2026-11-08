@@ -1817,7 +1817,7 @@ bool initialize() {
 	PointLightBufferData point_light_data =
 		createPointLightBufferData();
 
-	if (!createDeviceBuffer(
+	if (!createBuffer(
 			sizeof(PointLightBufferData),
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
 			&point_light_data,
@@ -1832,7 +1832,7 @@ bool initialize() {
 	SpotLightBufferData spot_light_data =
 		createSpotLightBufferData();
 
-	if (!createDeviceBuffer(
+	if (!createBuffer(
 			sizeof(SpotLightBufferData),
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
 			&spot_light_data,
