@@ -78,6 +78,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 	glm::glm
 )
 
+target_compile_definitions(${PROJECT_NAME} PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
+
 target_include_directories(${PROJECT_NAME} PRIVATE ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
 
 target_sources(${PROJECT_NAME} PRIVATE
@@ -114,6 +116,7 @@ if(GLSLC_FOUND)
 	compile_shader(icosahedron.vert)
 	compile_shader(icosahedron.frag)
 	compile_shader(light_visualization.frag)
+	compile_shader(shadow.vert)
 
 	add_custom_target(shaders DEPENDS ${_SHADER_BINARIES})
 	add_dependencies(${PROJECT_NAME} shaders)

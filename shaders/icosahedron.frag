@@ -4,13 +4,17 @@ layout(location = 0) in vec3 fragPosition;
 layout(location = 1) in vec3 vertexColor;
 layout(location = 2) in vec3 fragNormal;
 layout(location = 3) in vec2 fragTexCoord;
+layout(location = 4) in vec4 fragLightSpacePosition;
+layout(location = 5) in vec4 fragSpotLightSpacePosition;
 
 layout(location = 0) out vec4 outColor;
 
 layout(set = 0, binding = 0) uniform SceneUniformBuffer {
     mat4 view;
     mat4 projection;
+    mat4 lightViewProjection;
     vec4 light_direction;
+    mat4 spotLightViewProjection;
     vec4 light_color;
     vec4 ambient;
     vec4 camera_position;
@@ -53,12 +57,68 @@ layout(set = 1, binding = 0) uniform ModelUniformBuffer {
 layout(set = 1, binding = 1) uniform sampler2D albedoTexture;
 layout(set = 1, binding = 2) uniform sampler2D specularTexture;
 layout(set = 1, binding = 3) uniform sampler2D emissiveTexture;
+layout(set = 0, binding = 3) uniform sampler2DShadow shadowMap;
+layout(set = 0, binding = 4) uniform sampler2DShadow spotShadowMap;
 
 layout(push_constant) uniform SamplingPushConstants {
     int enabled;
     float time;
     float strength;
 } sampling;
+
+float calculateShadow(vec3 normal, vec3 lightDirection)
+{
+    if (fragLightSpacePosition.w <= 0.0)
+        return 1.0;
+
+    vec3 projectedCoords =
+        fragLightSpacePosition.xyz / fragLightSpacePosition.w;
+
+    projectedCoords.xy = projectedCoords.xy * 0.5 + 0.5;
+
+    if (projectedCoords.z < 0.0 || projectedCoords.z > 1.0 ||
+        projectedCoords.x < 0.0 || projectedCoords.x > 1.0 ||
+        projectedCoords.y < 0.0 || projectedCoords.y > 1.0) {
+        return 1.0;
+    }
+
+    float bias = max(
+        0.02 * (1.0 - dot(normal, lightDirection)),
+        0.003
+    );
+
+    return texture(
+        shadowMap,
+        vec3(projectedCoords.xy, projectedCoords.z - bias)
+    );
+}
+
+float calculateSpotShadow(vec3 normal, vec3 lightDirection)
+{
+    if (fragSpotLightSpacePosition.w <= 0.0)
+        return 1.0;
+
+    vec3 projectedCoords =
+        fragSpotLightSpacePosition.xyz / fragSpotLightSpacePosition.w;
+
+    projectedCoords.xy = projectedCoords.xy * 0.5 + 0.5;
+
+    if (projectedCoords.z < 0.0 || projectedCoords.z > 1.0 ||
+        projectedCoords.x < 0.0 || projectedCoords.x > 1.0 ||
+        projectedCoords.y < 0.0 || projectedCoords.y > 1.0) {
+        return 1.0;
+    }
+
+    float bias = max(
+        0.02 * (1.0 - dot(normal, lightDirection)),
+        0.003
+    );
+
+    return texture(
+        spotShadowMap,
+        vec3(projectedCoords.xy, projectedCoords.z - bias)
+    );
+}
 
 void main()
 {
@@ -85,13 +145,15 @@ void main()
                  * scene.ambient.rgb
                  * scene.ambient.a;
 
-    vec3 L = normalize(-scene.light_direction.xyz);
+    vec3 L = normalize(scene.light_direction.xyz);
     float diffuseFactor = max(dot(N, L), 0.0);
+    float shadow = calculateShadow(N, L);
 
     vec3 diffuse = baseColor
-                 * scene.light_color.rgb
-                 * scene.light_color.a
-                 * diffuseFactor;
+             * scene.light_color.rgb
+             * scene.light_color.a
+             * diffuseFactor
+             * shadow;
 
     vec3 specular = vec3(0.0);
 
@@ -104,10 +166,11 @@ void main()
         );
 
         specular = specularMap
-                 * modelData.material_specular.rgb
-                 * scene.light_color.rgb
-                 * scene.light_color.a
-                 * specularFactor;
+            * modelData.material_specular.rgb
+            * scene.light_color.rgb
+            * scene.light_color.a
+            * specularFactor
+            * shadow;
     }
 
     vec3 pointLighting = vec3(0.0);
@@ -175,6 +238,9 @@ void main()
                 1.0 / (distanceToLight * distanceToLight);
 
             float diffuseSpot = max(dot(N, Ls), 0.0);
+            float spotShadow = i == 0u
+                ? calculateSpotShadow(N, Ls)
+                : 1.0;
 
             vec3 spotDiffuse =
                 baseColor * light.color.rgb * diffuseSpot;
@@ -196,10 +262,11 @@ void main()
             }
 
             spotLighting +=
-                (spotDiffuse + spotSpecular)
-                * attenuation
-                * coneFactor
-                * light.color.a;
+            (spotDiffuse + spotSpecular)
+            * attenuation
+            * coneFactor
+            * light.color.a
+            * spotShadow;
         }
     }
 
